@@ -1,0 +1,9 @@
+namespace UrlShortener.Models;
+
+public sealed class ClickEvent
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ShortUrlId { get; set; }
+    public DateTimeOffset AccessedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public string? UserAgent { get; set; }
+}

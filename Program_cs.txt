@@ -1,0 +1,48 @@
+using Microsoft.EntityFrameworkCore;
+using UrlShortener.Data;
+using UrlShortener.Orchestration;
+using UrlShortener.Services;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add services to the container.
+builder.Services.AddControllers();
+// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("SwaggerDevPolicy", policy =>
+        policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod());
+});
+
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseInMemoryDatabase("url-shortener"));
+
+builder.Services.AddScoped<IUrlShortenerService, UrlShortenerService>();
+builder.Services.AddSingleton<IShortCodeGenerator, Base62ShortCodeGenerator>();
+builder.Services.AddSingleton<IApprovalService, DevApprovalService>();
+builder.Services.AddSingleton<IPolicyGuard, DefaultPolicyGuard>();
+builder.Services.AddSingleton<AgenticOrchestrator>();
+
+var app = builder.Build();
+
+// Configure the HTTP request pipeline.
+app.UseSwagger();
+app.UseSwaggerUI();
+
+app.UseCors("SwaggerDevPolicy");
+
+app.UseAuthorization();
+
+app.MapControllers();
+
+app.MapGet("/{code}", async (string code, IUrlShortenerService service, HttpContext httpContext) =>
+{
+    var destination = await service.ResolveAsync(code, httpContext.Request.Headers.UserAgent.ToString());
+    return destination is null ? Results.NotFound() : Results.Redirect(destination);
+});
+
+app.Run();
+
+public partial class Program { }

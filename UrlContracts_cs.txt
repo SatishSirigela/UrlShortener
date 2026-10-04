@@ -1,0 +1,5 @@
+namespace UrlShortener.Contracts;
+
+public sealed record CreateShortUrlRequest(string Url);
+public sealed record CreateShortUrlResponse(string Code, string ShortUrl, string OriginalUrl, DateTimeOffset CreatedAtUtc);
+public sealed record UrlAnalyticsResponse(string Code, string OriginalUrl, int ClickCount, DateTimeOffset CreatedAtUtc);

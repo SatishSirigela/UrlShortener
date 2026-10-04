@@ -1,0 +1,78 @@
+using NUnit.Framework;
+using System.Net;
+using System.Text.Json;
+using Microsoft.AspNetCore.Mvc.Testing;
+
+namespace UrlShortener.Tests.Integration;
+
+[TestFixture]
+public sealed class OrchestrationEndpointsIntegrationTests
+{
+    private CustomWebApplicationFactory _factory = null!;
+    private HttpClient _client = null!;
+
+    [SetUp]
+    public void SetUp()
+    {
+        _factory = new CustomWebApplicationFactory();
+        _client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false
+        });
+    }
+
+    [TearDown]
+    public void TearDown()
+    {
+        _client.Dispose();
+        _factory.Dispose();
+    }
+
+    [TestCase("greenfield")]
+    [TestCase("brownfield")]
+    [TestCase("ambiguous")]
+    public async Task RunScenario_WithKnownScenario_ReturnsSuccessfulWorkflowReport(string scenario)
+    {
+        var response = await _client.PostAsync($"/api/orchestration/run/{scenario}", content: null);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+
+        var payload = await response.Content.ReadAsStringAsync();
+        using var json = JsonDocument.Parse(payload);
+        var root = json.RootElement;
+
+        Assert.That(root.GetProperty("succeeded").GetBoolean(), Is.True);
+        Assert.That(root.GetProperty("totalNodes").GetInt32(), Is.EqualTo(6));
+        Assert.That(root.GetProperty("succeededNodes").GetInt32(), Is.EqualTo(6));
+        Assert.That(root.GetProperty("failedNodes").GetInt32(), Is.EqualTo(0));
+        Assert.That(root.GetProperty("retryCount").GetInt32(), Is.EqualTo(0));
+        Assert.That(root.GetProperty("rollbackCount").GetInt32(), Is.EqualTo(0));
+
+        var decisionLineage = root.GetProperty("decisionLineage")
+            .EnumerateArray()
+            .Select(x => x.GetString() ?? string.Empty)
+            .ToArray();
+
+        Assert.That(decisionLineage.Any(x => x.Contains("Start node: requirements", StringComparison.Ordinal)), Is.True);
+        Assert.That(decisionLineage.Any(x => x.Contains("Succeeded node: release", StringComparison.Ordinal)), Is.True);
+    }
+
+    [Test]
+    public async Task RunScenario_WithBrownfield_IncludesImplementationNodeExecution()
+    {
+        var response = await _client.PostAsync("/api/orchestration/run/brownfield", content: null);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+
+        var payload = await response.Content.ReadAsStringAsync();
+        using var json = JsonDocument.Parse(payload);
+
+        var decisionLineage = json.RootElement.GetProperty("decisionLineage")
+            .EnumerateArray()
+            .Select(x => x.GetString() ?? string.Empty)
+            .ToArray();
+
+        Assert.That(decisionLineage.Any(x => x.Contains("Start node: implementation", StringComparison.Ordinal)), Is.True);
+        Assert.That(decisionLineage.Any(x => x.Contains("Succeeded node: implementation", StringComparison.Ordinal)), Is.True);
+    }
+}

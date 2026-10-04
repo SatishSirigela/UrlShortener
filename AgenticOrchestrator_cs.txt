@@ -1,0 +1,169 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
+
+namespace UrlShortener.Orchestration;
+
+public sealed record WorkflowNode(
+    string Id,
+    string Name,
+    IReadOnlyCollection<string> Dependencies,
+    Func<WorkflowContext, CancellationToken, Task> Action,
+    bool RequiresHumanApproval = false,
+    int MaxRetries = 1,
+    Func<WorkflowContext, CancellationToken, Task>? Rollback = null);
+
+public sealed class WorkflowContext
+{
+    public ConcurrentDictionary<string, object> State { get; } = new();
+    public List<string> DecisionLineage { get; } = [];
+    public bool SafeStopRequested { get; set; }
+    public int RetryCount { get; set; }
+    public int RollbackCount { get; set; }
+}
+
+public sealed record WorkflowExecutionReport(
+    bool Succeeded,
+    TimeSpan EndToEndLatency,
+    int TotalNodes,
+    int SucceededNodes,
+    int FailedNodes,
+    int RetryCount,
+    int RollbackCount,
+    IReadOnlyList<string> DecisionLineage);
+
+public interface IApprovalService
+{
+    Task<bool> ApproveAsync(string nodeId, string reason, CancellationToken cancellationToken);
+}
+
+public interface IPolicyGuard
+{
+    Task EnsureAllowedAsync(string nodeId, WorkflowContext context, CancellationToken cancellationToken);
+}
+
+public sealed class DevApprovalService : IApprovalService
+{
+    public Task<bool> ApproveAsync(string nodeId, string reason, CancellationToken cancellationToken)
+        => Task.FromResult(true); // Replace with real human-in-the-loop integration.
+}
+
+public sealed class DefaultPolicyGuard : IPolicyGuard
+{
+    public Task EnsureAllowedAsync(string nodeId, WorkflowContext context, CancellationToken cancellationToken)
+    {
+        if (context.SafeStopRequested)
+        {
+            throw new InvalidOperationException("Safe-stop activated.");
+        }
+
+        return Task.CompletedTask;
+    }
+}
+
+public sealed class AgenticOrchestrator(IApprovalService approvalService, IPolicyGuard policyGuard)
+{
+    public async Task<WorkflowExecutionReport> ExecuteAsync(
+        IReadOnlyCollection<WorkflowNode> graph,
+        WorkflowContext context,
+        CancellationToken cancellationToken = default)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        var nodes = graph.ToDictionary(x => x.Id);
+        var status = nodes.Keys.ToDictionary(x => x, _ => "Pending");
+
+        while (status.Values.Any(x => x == "Pending"))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var runnable = nodes.Values
+                .Where(n => status[n.Id] == "Pending" && n.Dependencies.All(d => status[d] == "Succeeded"))
+                .ToList();
+
+            if (runnable.Count == 0)
+            {
+                break;
+            }
+
+            var batchTasks = runnable.Select(node => ExecuteNodeAsync(node, context, status, cancellationToken));
+            await Task.WhenAll(batchTasks);
+
+            if (context.SafeStopRequested)
+            {
+                break;
+            }
+        }
+
+        stopwatch.Stop();
+
+        var succeeded = status.Count(x => x.Value == "Succeeded");
+        var failed = status.Count(x => x.Value == "Failed");
+        var isSuccess = failed == 0 && succeeded > 0;
+
+        return new WorkflowExecutionReport(
+            isSuccess,
+            stopwatch.Elapsed,
+            status.Count,
+            succeeded,
+            failed,
+            context.RetryCount,
+            context.RollbackCount,
+            context.DecisionLineage);
+    }
+
+    private async Task ExecuteNodeAsync(
+        WorkflowNode node,
+        WorkflowContext context,
+        IDictionary<string, string> status,
+        CancellationToken cancellationToken)
+    {
+        status[node.Id] = "Running";
+        context.DecisionLineage.Add($"Start node: {node.Id}");
+
+        if (node.RequiresHumanApproval)
+        {
+            var approved = await approvalService.ApproveAsync(node.Id, "High-impact stage", cancellationToken);
+            if (!approved)
+            {
+                status[node.Id] = "Failed";
+                context.SafeStopRequested = true;
+                context.DecisionLineage.Add($"Approval denied: {node.Id}");
+                return;
+            }
+        }
+
+        await policyGuard.EnsureAllowedAsync(node.Id, context, cancellationToken);
+
+        for (var attempt = 1; attempt <= node.MaxRetries + 1; attempt++)
+        {
+            try
+            {
+                await node.Action(context, cancellationToken);
+                status[node.Id] = "Succeeded";
+                context.DecisionLineage.Add($"Succeeded node: {node.Id} (attempt {attempt})");
+                return;
+            }
+            catch (Exception ex)
+            {
+                if (attempt <= node.MaxRetries)
+                {
+                    context.RetryCount++;
+                    context.DecisionLineage.Add($"Retry node: {node.Id} (attempt {attempt}) reason={ex.Message}");
+                    continue;
+                }
+
+                status[node.Id] = "Failed";
+                context.DecisionLineage.Add($"Failed node: {node.Id} reason={ex.Message}");
+
+                if (node.Rollback is not null)
+                {
+                    await node.Rollback(context, cancellationToken);
+                    context.RollbackCount++;
+                    context.DecisionLineage.Add($"Rollback node: {node.Id}");
+                }
+
+                context.SafeStopRequested = true;
+                return;
+            }
+        }
+    }
+}

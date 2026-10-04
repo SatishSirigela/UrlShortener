@@ -1,0 +1,79 @@
+using Microsoft.EntityFrameworkCore;
+using NUnit.Framework;
+using UrlShortener.Contracts;
+using UrlShortener.Data;
+using UrlShortener.Services;
+
+namespace UrlShortener.Tests.Services;
+
+[TestFixture]
+public sealed class UrlShortenerServiceTests
+{
+    [Test]
+    public async Task CreateAsync_WithValidUrl_CreatesAndReturnsShortUrl()
+    {
+        var dbContext = CreateDbContext();
+        var service = new UrlShortenerService(dbContext, new DeterministicShortCodeGenerator("abc1234"));
+
+        var result = await service.CreateAsync(
+            new CreateShortUrlRequest("https://example.com/path"),
+            "https://short.local");
+
+        Assert.That(result.Code, Is.EqualTo("abc1234"));
+        Assert.That(result.ShortUrl, Is.EqualTo("https://short.local/abc1234"));
+        Assert.That(result.OriginalUrl, Is.EqualTo("https://example.com/path"));
+        Assert.That(await dbContext.ShortUrls.CountAsync(), Is.EqualTo(1));
+    }
+
+    [Test]
+    public void CreateAsync_WithInvalidUrl_ThrowsArgumentException()
+    {
+        var dbContext = CreateDbContext();
+        var service = new UrlShortenerService(dbContext, new DeterministicShortCodeGenerator("abc1234"));
+
+        Assert.ThrowsAsync<ArgumentException>(async () =>
+            await service.CreateAsync(new CreateShortUrlRequest("not-a-valid-url"), "https://short.local"));
+    }
+
+    [Test]
+    public async Task ResolveAsync_WithExistingCode_ReturnsOriginalUrl_AndIncrementsAnalytics()
+    {
+        var dbContext = CreateDbContext();
+        var service = new UrlShortenerService(dbContext, new DeterministicShortCodeGenerator("abc1234"));
+
+        var created = await service.CreateAsync(new CreateShortUrlRequest("https://contoso.com"), "https://short.local");
+        var resolved = await service.ResolveAsync(created.Code, "test-agent");
+
+        Assert.That(resolved, Is.Not.Null);
+        Assert.That(resolved, Is.EqualTo("https://contoso.com"));
+
+        var analytics = await service.GetAnalyticsAsync(created.Code);
+        Assert.That(analytics, Is.Not.Null);
+        Assert.That(analytics!.ClickCount, Is.EqualTo(1));
+        Assert.That(await dbContext.ClickEvents.CountAsync(), Is.EqualTo(1));
+    }
+
+    [Test]
+    public async Task GetAnalyticsAsync_WithUnknownCode_ReturnsNull()
+    {
+        var dbContext = CreateDbContext();
+        var service = new UrlShortenerService(dbContext, new DeterministicShortCodeGenerator("abc1234"));
+
+        var analytics = await service.GetAnalyticsAsync("missing");
+        Assert.That(analytics, Is.Null);
+    }
+
+    private static AppDbContext CreateDbContext()
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+
+        return new AppDbContext(options);
+    }
+
+    private sealed class DeterministicShortCodeGenerator(string value) : IShortCodeGenerator
+    {
+        public string Generate(int length = 7) => value;
+    }
+}

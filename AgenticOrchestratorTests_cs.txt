@@ -1,0 +1,103 @@
+using NUnit.Framework;
+using UrlShortener.Orchestration;
+
+namespace UrlShortener.Tests.Orchestration;
+
+public sealed class AgenticOrchestratorTests
+{
+    [Test]
+    public async Task ExecuteAsync_WhenGraphSucceeds_ReturnsSuccessReport()
+    {
+        var orchestrator = new AgenticOrchestrator(new AllowApprovalService(), new AllowPolicyGuard());
+        var context = new WorkflowContext();
+
+        var graph = new[]
+        {
+            new WorkflowNode("requirements", "Requirements", [], (ctx, _) =>
+            {
+                ctx.State["requirements"] = "ok";
+                return Task.CompletedTask;
+            }),
+            new WorkflowNode("design", "Design", ["requirements"], (ctx, _) =>
+            {
+                ctx.State["design"] = "ok";
+                return Task.CompletedTask;
+            })
+        };
+
+        var report = await orchestrator.ExecuteAsync(graph, context);
+
+        Assert.That(report.Succeeded, Is.True);
+        Assert.That(report.TotalNodes, Is.EqualTo(2));
+        Assert.That(report.SucceededNodes, Is.EqualTo(2));
+        Assert.That(report.FailedNodes, Is.EqualTo(0));
+    }
+
+    [Test]
+    public async Task ExecuteAsync_WhenActionFailsThenRetries_IncrementsRetryCount()
+    {
+        var orchestrator = new AgenticOrchestrator(new AllowApprovalService(), new AllowPolicyGuard());
+        var context = new WorkflowContext();
+        var attempts = 0;
+
+        var graph = new[]
+        {
+            new WorkflowNode("implementation", "Implementation", [], (ctx, _) =>
+            {
+                attempts++;
+                if (attempts == 1)
+                {
+                    throw new InvalidOperationException("Transient failure");
+                }
+
+                return Task.CompletedTask;
+            }, MaxRetries: 1)
+        };
+
+        var report = await orchestrator.ExecuteAsync(graph, context);
+
+        Assert.That(report.Succeeded, Is.True);
+        Assert.That(report.RetryCount, Is.EqualTo(1));
+    }
+
+    [Test]
+    public async Task ExecuteAsync_WhenApprovalDenied_FailsAndSafeStops()
+    {
+        var orchestrator = new AgenticOrchestrator(new DenyApprovalService(), new AllowPolicyGuard());
+        var context = new WorkflowContext();
+
+        var graph = new[]
+        {
+            new WorkflowNode(
+                "release",
+                "Release",
+                [],
+                (ctx, _) => Task.CompletedTask,
+                RequiresHumanApproval: true)
+        };
+
+        var report = await orchestrator.ExecuteAsync(graph, context);
+
+        Assert.That(report.Succeeded, Is.False);
+        Assert.That(report.FailedNodes, Is.EqualTo(1));
+        Assert.That(context.SafeStopRequested, Is.True);
+    }
+
+    private sealed class AllowApprovalService : IApprovalService
+    {
+        public Task<bool> ApproveAsync(string nodeId, string reason, CancellationToken cancellationToken)
+            => Task.FromResult(true);
+    }
+
+    private sealed class DenyApprovalService : IApprovalService
+    {
+        public Task<bool> ApproveAsync(string nodeId, string reason, CancellationToken cancellationToken)
+            => Task.FromResult(false);
+    }
+
+    private sealed class AllowPolicyGuard : IPolicyGuard
+    {
+        public Task EnsureAllowedAsync(string nodeId, WorkflowContext context, CancellationToken cancellationToken)
+            => Task.CompletedTask;
+    }
+}

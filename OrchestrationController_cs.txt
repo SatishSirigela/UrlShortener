@@ -1,0 +1,94 @@
+using Microsoft.AspNetCore.Mvc;
+using UrlShortener.Orchestration;
+
+namespace UrlShortener.Controllers;
+
+[ApiController]
+[Route("api/orchestration")]
+public sealed class OrchestrationController(AgenticOrchestrator orchestrator) : ControllerBase
+{
+    [HttpPost("run/{scenario}")]
+    public async Task<ActionResult<WorkflowExecutionReport>> Run(string scenario, CancellationToken cancellationToken)
+    {
+        var context = new WorkflowContext();
+        var graph = BuildScenarioGraph(scenario);
+
+        var result = await orchestrator.ExecuteAsync(graph, context, cancellationToken);
+        return Ok(result);
+    }
+
+    private static IReadOnlyCollection<WorkflowNode> BuildScenarioGraph(string scenario)
+    {
+        var normalized = scenario.Trim().ToLowerInvariant();
+
+        var requirements = new WorkflowNode(
+            "requirements",
+            "Requirement analysis",
+            [],
+            (ctx, _) =>
+            {
+                ctx.State["requirements"] = "normalized";
+                return Task.CompletedTask;
+            });
+
+        var design = new WorkflowNode(
+            "design",
+            "Architecture and API design",
+            ["requirements"],
+            (ctx, _) =>
+            {
+                ctx.State["design"] = "complete";
+                return Task.CompletedTask;
+            });
+
+        var implementation = new WorkflowNode(
+            "implementation",
+            "Implementation",
+            ["design"],
+            (ctx, _) =>
+            {
+                ctx.State["implementation"] = "complete";
+                return Task.CompletedTask;
+            },
+            RequiresHumanApproval: normalized == "brownfield",
+            MaxRetries: 1);
+
+        var testing = new WorkflowNode(
+            "testing",
+            "Testing and validation",
+            ["implementation"],
+            (ctx, _) =>
+            {
+                ctx.State["tests"] = "passed";
+                return Task.CompletedTask;
+            });
+
+        var docs = new WorkflowNode(
+            "docs",
+            "Documentation",
+            ["implementation"],
+            (ctx, _) =>
+            {
+                ctx.State["docs"] = "updated";
+                return Task.CompletedTask;
+            });
+
+        var release = new WorkflowNode(
+            "release",
+            "Release readiness gate",
+            ["testing", "docs"],
+            (ctx, _) =>
+            {
+                if (!ctx.State.ContainsKey("tests"))
+                {
+                    throw new InvalidOperationException("Validation gate failed.");
+                }
+
+                ctx.State["release"] = "ready";
+                return Task.CompletedTask;
+            },
+            RequiresHumanApproval: true);
+
+        return [requirements, design, implementation, testing, docs, release];
+    }
+}

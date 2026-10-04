@@ -1,0 +1,73 @@
+using Microsoft.EntityFrameworkCore;
+using UrlShortener.Contracts;
+using UrlShortener.Data;
+using UrlShortener.Models;
+
+namespace UrlShortener.Services;
+
+public interface IUrlShortenerService
+{
+    Task<CreateShortUrlResponse> CreateAsync(CreateShortUrlRequest request, string baseUrl);
+    Task<string?> ResolveAsync(string code, string? userAgent);
+    Task<UrlAnalyticsResponse?> GetAnalyticsAsync(string code);
+}
+
+public sealed class UrlShortenerService(AppDbContext dbContext, IShortCodeGenerator shortCodeGenerator) : IUrlShortenerService
+{
+    public async Task<CreateShortUrlResponse> CreateAsync(CreateShortUrlRequest request, string baseUrl)
+    {
+        if (!Uri.TryCreate(request.Url, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new ArgumentException("Only absolute HTTP/HTTPS URLs are allowed.", nameof(request.Url));
+        }
+
+        string code;
+        do
+        {
+            code = shortCodeGenerator.Generate();
+        } while (await dbContext.ShortUrls.AnyAsync(x => x.Code == code));
+
+        var entity = new ShortUrl
+        {
+            Code = code,
+            OriginalUrl = request.Url
+        };
+
+        dbContext.ShortUrls.Add(entity);
+        await dbContext.SaveChangesAsync();
+
+        return new CreateShortUrlResponse(
+            entity.Code,
+            $"{baseUrl.TrimEnd('/')}/{entity.Code}",
+            entity.OriginalUrl,
+            entity.CreatedAtUtc);
+    }
+
+    public async Task<string?> ResolveAsync(string code, string? userAgent)
+    {
+        var shortUrl = await dbContext.ShortUrls.FirstOrDefaultAsync(x => x.Code == code);
+        if (shortUrl is null)
+        {
+            return null;
+        }
+
+        shortUrl.ClickCount++;
+        dbContext.ClickEvents.Add(new ClickEvent
+        {
+            ShortUrlId = shortUrl.Id,
+            UserAgent = userAgent
+        });
+
+        await dbContext.SaveChangesAsync();
+        return shortUrl.OriginalUrl;
+    }
+
+    public async Task<UrlAnalyticsResponse?> GetAnalyticsAsync(string code)
+    {
+        var shortUrl = await dbContext.ShortUrls.AsNoTracking().FirstOrDefaultAsync(x => x.Code == code);
+        return shortUrl is null
+            ? null
+            : new UrlAnalyticsResponse(shortUrl.Code, shortUrl.OriginalUrl, shortUrl.ClickCount, shortUrl.CreatedAtUtc);
+    }
+}
